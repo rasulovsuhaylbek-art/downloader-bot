@@ -1,14 +1,24 @@
 """
 Instagram/YouTube Video & Audio Downloader — Telegram bot
 Kutubxonalar: aiogram 3.x, yt-dlp, aiohttp, python-dotenv
+
+Ish tartibi:
+  1. Foydalanuvchi havola yuboradi
+  2. Bot videoni darhol yuboradi (tagida "@bot orqali yuklab olindi" yozuvi
+     va "Audiosini yuklab olish" tugmasi bilan)
+  3. Tugma bosilsa, shu videoning audiosi yuboriladi
 """
 
 import os
 import re
 import sys
+import html
 import uuid
+import shutil
 import asyncio
 import logging
+import tempfile
+from collections import OrderedDict
 from pathlib import Path
 
 try:
@@ -39,7 +49,7 @@ from aiohttp import web
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
-    stream=sys.stdout,  # Render loglarida ko'rinishi uchun stdout'ga majburlash
+    stream=sys.stdout,  # Render loglarida ko'rinishi uchun
 )
 log = logging.getLogger("dl-bot")
 
@@ -51,15 +61,41 @@ if not BOT_TOKEN:
 DOWNLOAD_DIR = Path("downloads")
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
-MAX_FILE_SIZE = 49 * 1024 * 1024
+MAX_FILE_SIZE = 49 * 1024 * 1024  # Telegram bot limiti ~50MB
 MAX_CONCURRENT_DOWNLOADS = 3
+MAX_PENDING_URLS = 1000
 
 URL_RE = re.compile(r"https?://\S+")
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+# Bot username (ishga tushganda get_me() dan yangilanadi)
+BOT_USERNAME = "mix_videobot"
+
+# ffmpeg bo'lsa audio mp3 ga aylantiriladi, bo'lmasa m4a shundayligicha yuboriladi
+HAS_FFMPEG = shutil.which("ffmpeg") is not None
+
+# Render "Secret Files" orqali cookies.txt qo'shsangiz (YouTube bloklasa kerak bo'ladi)
+COOKIES_FILE = None
+for _src in ("/etc/secrets/cookies.txt", "cookies.txt"):
+    if os.path.exists(_src):
+        # /etc/secrets faqat o'qish uchun — yt-dlp yozishi mumkin bo'lgan joyga nusxalaymiz
+        COOKIES_FILE = str(Path(tempfile.gettempdir()) / "cookies.txt")
+        shutil.copyfile(_src, COOKIES_FILE)
+        log.info("cookies.txt topildi va ishlatiladi: %s", _src)
+        break
+
+# Video format: avval 48MB dan kichik, bo'lmasa oddiy, oxirida eng kichik sifat
+VIDEO_FORMAT = (
+    "best[ext=mp4][filesize<48M]/"
+    "best[ext=mp4][filesize_approx<48M]/"
+    "worst[ext=mp4]/worst"
+)
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-pending_urls: dict[str, str] = {}
+# token -> havola (tugma bosilganda audio uchun kerak)
+pending_urls: "OrderedDict[str, str]" = OrderedDict()
 download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 
 
@@ -77,8 +113,31 @@ def is_supported(url: str) -> bool:
     return any(d in url for d in ("instagram.com", "youtube.com", "youtu.be"))
 
 
+def remember_url(url: str) -> str:
+    token = uuid.uuid4().hex[:12]
+    pending_urls[token] = url
+    while len(pending_urls) > MAX_PENDING_URLS:
+        pending_urls.popitem(last=False)
+    return token
+
+
+def caption_text() -> str:
+    return f"📥 @{BOT_USERNAME} orqali yuklab olindi"
+
+
+def audio_keyboard(token: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🎵 Audiosini yuklab olish", callback_data=f"au:{token}")
+    ]])
+
+
+def clean_error(e: Exception) -> str:
+    text = ANSI_RE.sub("", str(e)).replace("ERROR: ", "").strip()
+    return text[:250]
+
+
 def build_ydl_opts(mode: str, out_template: str) -> dict:
-    common = {
+    opts = {
         "outtmpl": out_template,
         "quiet": True,
         "no_warnings": True,
@@ -88,21 +147,24 @@ def build_ydl_opts(mode: str, out_template: str) -> dict:
         "socket_timeout": 30,
         "nocheckcertificate": True,
     }
+    if COOKIES_FILE:
+        opts["cookiefile"] = COOKIES_FILE
+
     if mode == "audio":
-        common.update({
-            "format": "bestaudio/best",
-            "postprocessors": [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192",
-            }],
-        })
+        if HAS_FFMPEG:
+            opts.update({
+                "format": "bestaudio/best",
+                "postprocessors": [{
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "192",
+                }],
+            })
+        else:
+            opts["format"] = "bestaudio[ext=m4a]/bestaudio/best"
     else:
-        common.update({
-            "format": "best[filesize<48M]/best",
-            "merge_output_format": "mp4",
-        })
-    return common
+        opts["format"] = VIDEO_FORMAT
+    return opts
 
 
 def run_download(url: str, mode: str) -> Path:
@@ -119,13 +181,67 @@ def run_download(url: str, mode: str) -> Path:
     return matches[0]
 
 
-def format_choice_keyboard(token: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🎬 Video", callback_data=f"dl:video:{token}"),
-            InlineKeyboardButton(text="🎵 Audio (mp3)", callback_data=f"dl:audio:{token}"),
-        ]
-    ])
+async def safe_edit(msg: Message, text: str):
+    try:
+        await msg.edit_text(text)
+    except TelegramBadRequest:
+        pass
+
+
+async def send_media(message: Message, url: str, mode: str, token: str):
+    """Havolani yuklab, video yoki audio sifatida yuboradi."""
+    status = await message.answer("⏳ Yuklab olinmoqda, biroz kuting...")
+    file_path: Path | None = None
+    try:
+        async with download_semaphore:
+            loop = asyncio.get_running_loop()
+            file_path = await loop.run_in_executor(None, run_download, url, mode)
+
+        if file_path.stat().st_size > MAX_FILE_SIZE:
+            await safe_edit(status, "⚠️ Fayl hajmi juda katta (Telegram limiti ~50MB dan oshib ketdi).")
+            return
+
+        await safe_edit(status, "📤 Yuborilmoqda...")
+        media = FSInputFile(file_path)
+
+        if mode == "audio":
+            if file_path.suffix.lower() in (".mp3", ".m4a"):
+                await message.answer_audio(media, caption=caption_text())
+            else:
+                await message.answer_document(media, caption=caption_text())
+        else:
+            await message.answer_video(
+                media,
+                caption=caption_text(),
+                reply_markup=audio_keyboard(token),
+                supports_streaming=True,
+            )
+
+        await status.delete()
+
+    except yt_dlp.utils.DownloadError as e:
+        log.warning("Download error: %s", e)
+        await safe_edit(
+            status,
+            "❌ Yuklab bo'lmadi.\n"
+            f"<code>{html.escape(clean_error(e))}</code>",
+        )
+    except TelegramBadRequest as e:
+        log.warning("Telegram send error: %s", e)
+        await safe_edit(status, "❌ Faylni yuborishda xatolik yuz berdi.")
+    except Exception as e:
+        log.exception("Unexpected error")
+        await safe_edit(
+            status,
+            "❌ Kutilmagan xatolik yuz berdi. Qayta urinib ko'ring.\n"
+            f"<code>{html.escape(clean_error(e))}</code>",
+        )
+    finally:
+        if file_path and file_path.exists():
+            try:
+                file_path.unlink()
+            except OSError:
+                pass
 
 
 # --------------------------------------------------------------------------
@@ -138,7 +254,7 @@ async def cmd_start(message: Message):
     await message.answer(
         "👋 Salom!\n\n"
         "Menga <b>Instagram</b> yoki <b>YouTube</b> havolasini yuboring — "
-        "video yoki faqat audio (mp3) shaklida yuklab beraman.\n\n"
+        "videoni yuklab beraman. Videoning tagidagi tugma orqali audiosini ham olishingiz mumkin.\n\n"
         "Shunchaki linkni tashlang 🙂"
     )
 
@@ -147,7 +263,7 @@ async def cmd_start(message: Message):
 async def cmd_help(message: Message):
     await message.answer(
         "📌 Qo'llab-quvvatlanadigan manbalar: Instagram, YouTube.\n"
-        "Havolani yuboring, keyin video yoki audio formatini tanlang."
+        "Havolani yuboring — video keladi. Audio kerak bo'lsa, videoning tagidagi tugmani bosing."
     )
 
 
@@ -162,67 +278,20 @@ async def handle_link(message: Message):
         await message.answer("Faqat Instagram va YouTube havolalarini qo'llab-quvvatlayman.")
         return
 
-    token = uuid.uuid4().hex[:12]
-    pending_urls[token] = url
-
-    await message.answer(
-        "Qanday formatda yuklab olay?",
-        reply_markup=format_choice_keyboard(token),
-    )
+    token = remember_url(url)
+    await send_media(message, url, "video", token)
 
 
-@dp.callback_query(F.data.startswith("dl:"))
-async def handle_download_choice(callback: CallbackQuery):
-    try:
-        _, mode, token = callback.data.split(":", 2)
-    except ValueError:
-        await callback.answer("Xato so'rov.", show_alert=True)
-        return
-
-    url = pending_urls.pop(token, None)
+@dp.callback_query(F.data.startswith("au:"))
+async def handle_audio_button(callback: CallbackQuery):
+    token = callback.data.split(":", 1)[1]
+    url = pending_urls.get(token)
     if not url:
-        await callback.answer("Havola muddati tugagan, iltimos qayta yuboring.", show_alert=True)
+        await callback.answer("Havola muddati tugagan, iltimos linkni qayta yuboring.", show_alert=True)
         return
 
-    await callback.answer()
-    status_msg = await callback.message.edit_text("⏳ Yuklab olinmoqda, biroz kuting...")
-
-    file_path: Path | None = None
-    try:
-        async with download_semaphore:
-            loop = asyncio.get_running_loop()
-            file_path = await loop.run_in_executor(None, run_download, url, mode)
-
-        size = file_path.stat().st_size
-        if size > MAX_FILE_SIZE:
-            await status_msg.edit_text("⚠️ Fayl hajmi juda katta (50MB limitidan oshib ketdi).")
-            return
-
-        await status_msg.edit_text("📤 Yuborilmoqda...")
-        input_file = FSInputFile(file_path)
-
-        if mode == "audio":
-            await callback.message.answer_audio(input_file)
-        else:
-            await callback.message.answer_video(input_file)
-
-        await status_msg.delete()
-
-    except yt_dlp.utils.DownloadError as e:
-        log.warning("Download error: %s", e)
-        await status_msg.edit_text("❌ Yuklab bo'lmadi. Havola noto'g'ri yoki video yopiq bo'lishi mumkin.")
-    except TelegramBadRequest as e:
-        log.warning("Telegram send error: %s", e)
-        await status_msg.edit_text("❌ Faylni yuborishda xatolik yuz berdi.")
-    except Exception:
-        log.exception("Unexpected error")
-        await status_msg.edit_text("❌ Kutilmagan xatolik yuz berdi. Qayta urinib ko'ring.")
-    finally:
-        if file_path and file_path.exists():
-            try:
-                file_path.unlink()
-            except OSError:
-                pass
+    await callback.answer("🎵 Audio tayyorlanmoqda...")
+    await send_media(callback.message, url, "audio", token)
 
 
 # --------------------------------------------------------------------------
@@ -234,6 +303,8 @@ async def handle_web(request):
 
 
 async def main():
+    global BOT_USERNAME
+
     # 1) Render "Web Service" portni talab qiladi — health-check server
     app = web.Application()
     app.router.add_get("/", handle_web)
@@ -244,9 +315,10 @@ async def main():
     await site.start()
     log.info("Web server %s-portda ishga tushdi.", port)
 
-    # 2) Tokenni tekshirish — noto'g'ri token bo'lsa DARHOL aniq xato beradi
+    # 2) Tokenni tekshirish
     try:
         me = await bot.get_me()
+        BOT_USERNAME = me.username or BOT_USERNAME
         log.info("Bot muvaffaqiyatli ulandi: @%s (id=%s)", me.username, me.id)
     except TelegramUnauthorizedError:
         log.critical(
@@ -258,6 +330,8 @@ async def main():
         log.exception("Botga ulanishda kutilmagan xato.")
         return
 
+    log.info("ffmpeg: %s | cookies: %s", "bor" if HAS_FFMPEG else "yo'q", "bor" if COOKIES_FILE else "yo'q")
+
     # 3) Eski webhook/pollingni tozalab, yagona polling boshlanadi
     await bot.delete_webhook(drop_pending_updates=True)
     log.info("Polling boshlanmoqda...")
@@ -265,8 +339,8 @@ async def main():
         await dp.start_polling(bot)
     except Exception:
         log.exception(
-            "Polling to'xtadi. Agar 'TerminatedByOtherGetUpdates' xatosi bo'lsa — "
-            "shu tokenda BOSHQA joyda (masalan kompyuteringizda) bot ishlab turgani uchun shunday bo'ladi. "
+            "Polling to'xtadi. Agar 'Conflict' xatosi bo'lsa — "
+            "shu tokenda BOSHQA joyda bot ishlab turgani uchun shunday bo'ladi. "
             "Faqat bitta joyda ishga tushiring."
         )
 
