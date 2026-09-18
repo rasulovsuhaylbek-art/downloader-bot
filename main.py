@@ -83,7 +83,6 @@ async def media_handler(message: types.Message):
 
             video = FSInputFile(output_file)
             
-            # Tugma yozuvi o'zgartirildi
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🚀 Botdan foydalanish", url="https://t.me/mix_videobot")]
             ])
@@ -91,11 +90,10 @@ async def media_handler(message: types.Message):
             final_width = width if width > 0 else 1080
             final_height = height if height > 0 else 1920
             
-            # Video ostidagi yozuv o'zgartirildi
+            # Markdown parse_mode olib tashlandi, shunda maxsus belgilar xato bermaydi
             kwargs = {
                 "video": video,
-                "caption": "✅ **@mix_videobot orqali yuklab olindi**",
-                "parse_mode": "Markdown",
+                "caption": "✅ @mix_videobot orqali yuklab olindi",
                 "supports_streaming": True,
                 "width": final_width,
                 "height": final_height,
