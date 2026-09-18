@@ -14,6 +14,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 def download_media(url: str, output_path: str):
+    # faststart yordamida videoning metama'lumotlarini boshiga o'tkizamiz (0:00 xatoligini yo'qotadi)
     ydl_opts = {
         'format': 'best',
         'outtmpl': output_path,
@@ -21,36 +22,46 @@ def download_media(url: str, output_path: str):
         'no_warnings': True,
         'nocheckcertificate': True,
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'postprocessors': [{
+            'key': 'FFmpegVideoConvertor',
+            'preferedformat': 'mp4',
+        }],
+        'postprocessor_args': {
+            'ffmpeg': ['-movflags', '+faststart']
+        }
     }
     duration = 0
     width = 0
     height = 0
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        if info:
-            duration = int(info.get('duration', 0) or 0)
-            width = int(info.get('width', 0) or 0)
-            height = int(info.get('height', 0) or 0)
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if info:
+                duration = int(info.get('duration', 0) or 0)
+                width = int(info.get('width', 0) or 0)
+                height = int(info.get('height', 0) or 0)
+    except Exception as e:
+        print(f"Download error: {e}")
     return output_path, duration, width, height
 
 def generate_thumbnail(video_path: str, thumb_path: str):
     try:
-        # ffmpeg yordamida videoning boshidan kadrni kesib olib, 320px o'lchamga keltiramiz
+        # ffmpeg orqali videoning boshidan chiroyli kadrni rasm qilib kesib olamiz
         cmd = [
             'ffmpeg', '-y', '-i', video_path,
-            '-ss', '00:00:00.5', '-vframes', '1',
+            '-ss', '00:00:01', '-vframes', '1',
             '-vf', 'scale=320:-1', thumb_path
         ]
-        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
         if os.path.exists(thumb_path):
             return thumb_path
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Thumb error: {e}")
     return None
 
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
-    await message.answer("Salom! Menga Instagram havolasini yuboring, videoni chiroyli muqova va pleyerda yuklab beraman.")
+    await message.answer("Salom! Menga Instagram havolasini yuboring, videoni to'g'ri pleyer va muqova bilan yuklab beraman.")
 
 @dp.message(F.text.contains("http"))
 async def media_handler(message: types.Message):
@@ -68,7 +79,7 @@ async def media_handler(message: types.Message):
 
         thumb_path = None
         if os.path.exists(output_file):
-            # Videoning o'zidan avtomatik muqova yasaymiz
+            # Videodan muqova yasaymiz
             thumb_path = await loop.run_in_executor(
                 None, generate_thumbnail, output_file, thumb_file
             )
@@ -106,7 +117,7 @@ async def media_handler(message: types.Message):
             await message.answer("❌ Videoni yuklab bo'lmadi.")
 
     except Exception as e:
-        await message.answer("❌ Videoni yuklashda xatolik yuz berdi. Havola to'g'riligini tekshiring.")
+        await message.answer(f"❌ Xatolik yuz berdi: {e}")
         if os.path.exists(output_file):
             os.remove(output_file)
         if os.path.exists(thumb_file):
