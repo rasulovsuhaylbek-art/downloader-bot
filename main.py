@@ -2,7 +2,7 @@ import os
 import asyncio
 import logging
 import subprocess
-import uuid
+import re
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
@@ -14,7 +14,11 @@ BOT_TOKEN = "8870665375:AAEtD8oMB-qEBQyMxPzn53pLwrJigWHk_rI"
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-url_cache = {}
+def extract_shortcode(url: str):
+    match = re.search(r'/(?:reel|p|reels)/([A-Za-z0-9_-]+)', url)
+    if match:
+        return match.group(1)
+    return None
 
 def download_video(url: str, output_path: str):
     ydl_opts = {
@@ -98,6 +102,11 @@ async def link_handler(message: types.Message):
         await message.answer("⚠️ Iltimos, audio sahifa havolasini emas, aniq bir video (Reel) havolasini yuboring.")
         return
 
+    shortcode = extract_shortcode(url)
+    if not shortcode:
+        await message.answer("❌ Havoladan video kodini aniqlab bo'lmadi. Iltimos, to'g'ri Instagram havolasini yuboring.")
+        return
+
     status_msg = await message.answer("⏳ Video yuklanmoqda, kuting...")
     user_id = message.from_user.id
     
@@ -116,14 +125,11 @@ async def link_handler(message: types.Message):
                 None, generate_thumbnail, output_file, thumb_file
             )
 
-            token = str(uuid.uuid4())[:8]
-            url_cache[token] = url
-
             video = FSInputFile(output_file)
             
-            # Faqat bitta tugma: Audiosini yuklab olish
+            # Shortcode to'g'ridan-to'g'ri tugmaga yoziladi (xotira shart emas)
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🎵 Audiosini yuklab olish", callback_data=f"aud_{token}")]
+                [InlineKeyboardButton(text="🎵 Audiosini yuklab olish", callback_data=f"aud_{shortcode}")]
             ])
             
             kwargs = {
@@ -158,13 +164,9 @@ async def link_handler(message: types.Message):
 
 @dp.callback_query(F.data.startswith("aud_"))
 async def callback_audio(callback: types.CallbackQuery):
-    token = callback.data.split("_", 1)[1]
-    url = url_cache.get(token)
+    shortcode = callback.data.split("_", 1)[1]
+    url = f"https://www.instagram.com/reel/{shortcode}/"
     
-    if not url:
-        await callback.answer("❌ Havola eskirgan yoki topilmadi.", show_alert=True)
-        return
-        
     await callback.answer("⏳ Qo'shiq yuklanmoqda...")
     user_id = callback.from_user.id
     output_file = f"file_aud_{user_id}.mp4"
@@ -196,9 +198,6 @@ async def callback_audio(callback: types.CallbackQuery):
         await callback.message.answer(f"❌ Xatolik yuz berdi: {e}")
         if os.path.exists(output_file):
             os.remove(output_file)
-    finally:
-        if token in url_cache:
-            del url_cache[token]
 
 async def handle(request):
     return web.Response(text="Bot is running!")
