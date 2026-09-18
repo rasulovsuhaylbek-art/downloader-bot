@@ -88,7 +88,7 @@ def generate_thumbnail(video_path: str, thumb_path: str):
 
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
-    await message.answer("Salom! Menga Instagram havolasini yuboring. Men videoni darhol yuklab beraman, ostida esa audiosini olish uchun tugma bo'ladi.")
+    await message.answer("Salom! Menga Instagram havolasini yuboring. Men videoni darhol yuklab beraman.")
 
 @dp.message(F.text.contains("http"))
 async def link_handler(message: types.Message):
@@ -116,13 +116,12 @@ async def link_handler(message: types.Message):
                 None, generate_thumbnail, output_file, thumb_file
             )
 
-            # Havolani vaqtincha xotirada saqlaymiz (tugma bosilganda audio olish uchun)
             token = str(uuid.uuid4())[:8]
             url_cache[token] = url
 
             video = FSInputFile(output_file)
             
-            # Tugma nomi o'zgartirildi
+            # Faqat bitta tugma: Audiosini yuklab olish
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🎵 Audiosini yuklab olish", callback_data=f"aud_{token}")]
             ])
