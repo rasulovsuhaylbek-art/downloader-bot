@@ -18,12 +18,8 @@ def download_media(url: str, output_path: str) -> str:
         'outtmpl': output_path,
         'quiet': True,
         'no_warnings': True,
-        'concurrent_fragment_downloads': 5,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['tvhtml5', 'android_vr', 'web']
-            }
-        }
+        'nocheckcertificate': True,
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
@@ -31,7 +27,7 @@ def download_media(url: str, output_path: str) -> str:
 
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
-    await message.answer("Salom! Menga YouTube, Instagram, TikTok yoki Pinterest havolasini yuboring, videoni yuklab beraman.")
+    await message.answer("Salom! Menga video havolasini yuboring, yuklab beraman.")
 
 @dp.message(F.text.contains("http"))
 async def media_handler(message: types.Message):
@@ -74,4 +70,4 @@ async def main():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     asyncio.run(main())
-  
+    
