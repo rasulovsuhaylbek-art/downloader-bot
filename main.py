@@ -23,7 +23,6 @@ def download_video(url: str, output_path: str):
         'quiet': True,
         'no_warnings': True,
         'nocheckcertificate': True,
-        'playlist_end': 1,
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'postprocessors': [{
             'key': 'FFmpegVideoConvertor',
@@ -38,8 +37,6 @@ def download_video(url: str, output_path: str):
     height = 0
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
-        if info and 'entries' in info:
-            info = info['entries'][0]
         if info:
             duration = int(info.get('duration', 0) or 0)
             width = int(info.get('width', 0) or 0)
@@ -54,7 +51,6 @@ def download_audio_file(url: str, output_path: str):
         'quiet': True,
         'no_warnings': True,
         'nocheckcertificate': True,
-        'playlist_end': 1,
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
@@ -69,8 +65,6 @@ def download_audio_file(url: str, output_path: str):
     
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
-        if info and 'entries' in info:
-            info = info['entries'][0]
         if info:
             title = info.get('title', 'Qo\'shiq')
             duration = int(info.get('duration', 0) or 0)
@@ -94,120 +88,118 @@ def generate_thumbnail(video_path: str, thumb_path: str):
 
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
-    await message.answer("Salom! Menga Instagram Reels, video yoki audio havolasini yuboring. Uni video yoki MP3 shaklida yuklab beraman.")
+    await message.answer("Salom! Menga Instagram havolasini yuboring. Men videoni darhol yuklab beraman, ostida esa audiosini olish uchun tugma bo'ladi.")
 
 @dp.message(F.text.contains("http"))
 async def link_handler(message: types.Message):
     url = message.text.strip()
     
-    token = str(uuid.uuid4())[:8]
-    url_cache[token] = url
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🎬 Video", callback_data=f"vid_{token}"),
-            InlineKeyboardButton(text="🎵 Qo'shiq (MP3)", callback_data=f"aud_{token}")
-        ]
-    ])
-    
-    await message.answer("📥 Qanday formatda yuklab olamiz?", reply_markup=keyboard)
+    if "/reels/audio/" in url:
+        await message.answer("⚠️ Iltimos, audio sahifa havolasini emas, aniq bir video (Reel) havolasini yuboring.")
+        return
 
-@dp.callback_query(F.data.startswith("vid_") | F.data.startswith("aud_"))
-async def callback_handler(callback: types.CallbackQuery):
-    action, token = callback.data.split("_", 1)
+    status_msg = await message.answer("⏳ Video yuklanmoqda, kuting...")
+    user_id = message.from_user.id
+    
+    output_file = f"file_{user_id}.mp4"
+    thumb_file = f"thumb_{user_id}.jpg"
+
+    try:
+        loop = asyncio.get_event_loop()
+        output_file, duration, width, height = await loop.run_in_executor(
+            None, download_video, url, output_file
+        )
+
+        thumb_path = None
+        if os.path.exists(output_file):
+            thumb_path = await loop.run_in_executor(
+                None, generate_thumbnail, output_file, thumb_file
+            )
+
+            # Havolani vaqtincha xotirada saqlaymiz (tugma bosilganda audio olish uchun)
+            token = str(uuid.uuid4())[:8]
+            url_cache[token] = url
+
+            video = FSInputFile(output_file)
+            
+            # Tugma nomi o'zgartirildi
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🎵 Audiosini yuklab olish", callback_data=f"aud_{token}")]
+            ])
+            
+            kwargs = {
+                "video": video,
+                "caption": "✅ @mix_videobot orqali yuklab olindi",
+                "parse_mode": None,
+                "supports_streaming": True,
+                "reply_markup": keyboard
+            }
+            if duration > 0:
+                kwargs["duration"] = duration
+            if width > 0 and height > 0:
+                kwargs["width"] = width
+                kwargs["height"] = height
+            if thumb_path and os.path.exists(thumb_path):
+                kwargs["thumbnail"] = FSInputFile(thumb_path)
+
+            await message.answer_video(**kwargs)
+            
+            os.remove(output_file)
+            if thumb_path and os.path.exists(thumb_path):
+                os.remove(thumb_path)
+        else:
+            await message.answer("❌ Videoni yuklab bo'lmadi.")
+
+    except Exception as e:
+        await message.answer(f"❌ Xatolik yuz berdi: {e}")
+        if os.path.exists(output_file):
+            os.remove(output_file)
+    finally:
+        await status_msg.delete()
+
+@dp.callback_query(F.data.startswith("aud_"))
+async def callback_audio(callback: types.CallbackQuery):
+    token = callback.data.split("_", 1)[1]
     url = url_cache.get(token)
     
     if not url:
-        await callback.message.edit_text("❌ Havola eskirgan. Iltimos, havolani qaytadan yuboring.")
+        await callback.answer("❌ Havola eskirgan yoki topilmadi.", show_alert=True)
         return
         
-    await callback.message.edit_text("⏳ Yuklanmoqda, kuting...")
+    await callback.answer("⏳ Qo'shiq yuklanmoqda...")
     user_id = callback.from_user.id
+    output_file = f"file_aud_{user_id}.mp4"
     
-    if action == "vid":
-        output_file = f"file_{user_id}.mp4"
-        thumb_file = f"thumb_{user_id}.jpg"
-        try:
-            loop = asyncio.get_event_loop()
-            output_file, duration, width, height = await loop.run_in_executor(
-                None, download_video, url, output_file
-            )
+    try:
+        loop = asyncio.get_event_loop()
+        mp3_path, title, duration, performer = await loop.run_in_executor(
+            None, download_audio_file, url, output_file
+        )
+        
+        if os.path.exists(mp3_path):
+            audio = FSInputFile(mp3_path)
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🚀 @mix_videobot", url="https://t.me/mix_videobot")]
+            ])
             
-            thumb_path = None
-            if os.path.exists(output_file):
-                thumb_path = await loop.run_in_executor(
-                    None, generate_thumbnail, output_file, thumb_file
-                )
-                
-                video = FSInputFile(output_file)
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🚀 Botdan foydalanish", url="https://t.me/mix_videobot")]
-                ])
-                
-                kwargs = {
-                    "video": video,
-                    "caption": "✅ @mix_videobot orqali yuklab olindi",
-                    "parse_mode": None,
-                    "supports_streaming": True,
-                    "reply_markup": keyboard
-                }
-                if duration > 0:
-                    kwargs["duration"] = duration
-                if width > 0 and height > 0:
-                    kwargs["width"] = width
-                    kwargs["height"] = height
-                if thumb_path and os.path.exists(thumb_path):
-                    kwargs["thumbnail"] = FSInputFile(thumb_path)
-                
-                await callback.message.answer_video(**kwargs)
-                await callback.message.delete()
-                
-                os.remove(output_file)
-                if thumb_path and os.path.exists(thumb_path):
-                    os.remove(thumb_path)
-            else:
-                await callback.message.edit_text("❌ Videoni yuklab bo'lmadi.")
-        except Exception as e:
-            await callback.message.edit_text(f"❌ Xatolik yuz berdi: {e}")
-            if os.path.exists(output_file):
-                os.remove(output_file)
-        finally:
-            if token in url_cache:
-                del url_cache[token]
-                
-    elif action == "aud":
-        output_file = f"file_{user_id}.mp4"
-        try:
-            loop = asyncio.get_event_loop()
-            mp3_path, title, duration, performer = await loop.run_in_executor(
-                None, download_audio_file, url, output_file
+            await callback.message.answer_audio(
+                audio=audio,
+                title=title,
+                performer=performer,
+                duration=duration,
+                caption="✅ @mix_videobot orqali yuklab olindi",
+                reply_markup=keyboard
             )
-            
-            if os.path.exists(mp3_path):
-                audio = FSInputFile(mp3_path)
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🚀 Botdan foydalanish", url="https://t.me/mix_videobot")]
-                ])
-                
-                await callback.message.answer_audio(
-                    audio=audio,
-                    title=title,
-                    performer=performer,
-                    duration=duration,
-                    caption="✅ @mix_videobot orqali yuklab olindi",
-                    reply_markup=keyboard
-                )
-                await callback.message.delete()
-                os.remove(mp3_path)
-            else:
-                await callback.message.edit_text("❌ Qo'shiqni yuklab bo'lmadi.")
-        except Exception as e:
-            await callback.message.edit_text(f"❌ Xatolik yuz berdi: {e}")
-            if os.path.exists(output_file):
-                os.remove(output_file)
-        finally:
-            if token in url_cache:
-                del url_cache[token]
+            os.remove(mp3_path)
+        else:
+            await callback.message.answer("❌ Qo'shiqni yuklab bo'lmadi.")
+    except Exception as e:
+        await callback.message.answer(f"❌ Xatolik yuz berdi: {e}")
+        if os.path.exists(output_file):
+            os.remove(output_file)
+    finally:
+        if token in url_cache:
+            del url_cache[token]
 
 async def handle(request):
     return web.Response(text="Bot is running!")
