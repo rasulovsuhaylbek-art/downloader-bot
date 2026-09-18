@@ -1,0 +1,77 @@
+import os
+import asyncio
+import logging
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import CommandStart
+from aiogram.types import FSInputFile
+import yt_dlp
+from aiohttp import web
+
+BOT_TOKEN = "8870665375:AAEtD8oMB-qEBQyMxPzn53pLwrJigWHk_rI"
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
+def download_media(url: str, output_path: str) -> str:
+    ydl_opts = {
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'outtmpl': output_path,
+        'quiet': True,
+        'no_warnings': True,
+        'concurrent_fragment_downloads': 5,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['tvhtml5', 'android_vr', 'web']
+            }
+        }
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+    return output_path
+
+@dp.message(CommandStart())
+async def start_handler(message: types.Message):
+    await message.answer("Salom! Menga YouTube, Instagram, TikTok yoki Pinterest havolasini yuboring, videoni yuklab beraman.")
+
+@dp.message(F.text.contains("http"))
+async def media_handler(message: types.Message):
+    url = message.text.strip()
+    status_msg = await message.answer("⏳ Media yuklanmoqda, kuting...")
+    output_file = f"file_{message.from_user.id}.mp4"
+
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, download_media, url, output_file)
+
+        if os.path.exists(output_file):
+            video = FSInputFile(output_file)
+            await message.answer_video(video=video, caption="✅ Muvaffaqiyatli yuklandi!")
+            os.remove(output_file)
+        else:
+            await message.answer("❌ Videoni yuklab bo'lmadi.")
+
+    except Exception as e:
+        await message.answer("❌ Videoni yuklashda xatolik yuz berdi. Havola to'g'riligini tekshiring.")
+        if os.path.exists(output_file):
+            os.remove(output_file)
+    finally:
+        await status_msg.delete()
+
+async def handle(request):
+    return web.Response(text="Bot is running!")
+
+async def main():
+    app = web.Application()
+    app.router.add_get("/", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    asyncio.run(main())
+  
