@@ -1,7 +1,7 @@
 import os
 import asyncio
 import logging
-import urllib.request
+import subprocess
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
@@ -13,7 +13,7 @@ BOT_TOKEN = "8870665375:AAEtD8oMB-qEBQyMxPzn53pLwrJigWHk_rI"
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-def download_media(url: str, output_path: str, thumb_path: str):
+def download_media(url: str, output_path: str):
     ydl_opts = {
         'format': 'best',
         'outtmpl': output_path,
@@ -25,26 +25,28 @@ def download_media(url: str, output_path: str, thumb_path: str):
     duration = 0
     width = 0
     height = 0
-    thumb_file = None
-
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         if info:
             duration = int(info.get('duration', 0) or 0)
             width = int(info.get('width', 0) or 0)
             height = int(info.get('height', 0) or 0)
-            
-            # Videoning muqova rasmini (thumbnail) tortib olish
-            thumb_url = info.get('thumbnail')
-            if thumb_url:
-                try:
-                    urllib.request.urlretrieve(thumb_url, thumb_path)
-                    if os.path.exists(thumb_path):
-                        thumb_file = thumb_path
-                except Exception:
-                    pass
+    return output_path, duration, width, height
 
-    return output_path, duration, width, height, thumb_file
+def generate_thumbnail(video_path: str, thumb_path: str):
+    try:
+        # ffmpeg yordamida videoning boshidan kadrni kesib olib, 320px o'lchamga keltiramiz
+        cmd = [
+            'ffmpeg', '-y', '-i', video_path,
+            '-ss', '00:00:00.5', '-vframes', '1',
+            '-vf', 'scale=320:-1', thumb_path
+        ]
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+        if os.path.exists(thumb_path):
+            return thumb_path
+    except Exception:
+        pass
+    return None
 
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
@@ -60,11 +62,17 @@ async def media_handler(message: types.Message):
 
     try:
         loop = asyncio.get_event_loop()
-        output_file, duration, width, height, thumb_path = await loop.run_in_executor(
-            None, download_media, url, output_file, thumb_file
+        output_file, duration, width, height = await loop.run_in_executor(
+            None, download_media, url, output_file
         )
 
+        thumb_path = None
         if os.path.exists(output_file):
+            # Videoning o'zidan avtomatik muqova yasaymiz
+            thumb_path = await loop.run_in_executor(
+                None, generate_thumbnail, output_file, thumb_file
+            )
+
             video = FSInputFile(output_file)
             
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -86,13 +94,11 @@ async def media_handler(message: types.Message):
             if duration > 0:
                 kwargs["duration"] = duration
             
-            # Agar muqova rasm muvaffaqiyatli yuklangan bo'lsa, unga qo'shamiz
             if thumb_path and os.path.exists(thumb_path):
                 kwargs["thumbnail"] = FSInputFile(thumb_path)
 
             await message.answer_video(**kwargs)
             
-            # Vaqtinchalik fayllarni tozalash
             os.remove(output_file)
             if thumb_path and os.path.exists(thumb_path):
                 os.remove(thumb_path)
