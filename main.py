@@ -1,29 +1,20 @@
 """
 Instagram/YouTube Video & Audio Downloader — Telegram bot
-Kutubxonalar: aiogram 3.x, yt-dlp
-
-O'rnatish:
-    pip install aiogram yt-dlp --break-system-packages
-    (yt-dlp doim eng yangi versiyada bo'lishi kerak: pip install -U yt-dlp --break-system-packages)
-
-Ishga tushirish:
-    export BOT_TOKEN="sizning_yangi_tokeningiz"
-    python3 bot.py
+Kutubxonalar: aiogram 3.x, yt-dlp, aiohttp
 """
 
 import os
 import re
 import uuid
-import shutil
 import asyncio
 import logging
 from pathlib import Path
 
 try:
     from dotenv import load_dotenv
-    load_dotenv()  # loyiha papkasidagi .env faylni avtomatik o'qiydi
+    load_dotenv()
 except ImportError:
-    pass  # python-dotenv o'rnatilmagan bo'lsa, oddiy environment variable ishlatiladi
+    pass
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
@@ -37,8 +28,8 @@ from aiogram.types import (
     InlineKeyboardButton,
 )
 from aiogram.exceptions import TelegramBadRequest
-
 import yt_dlp
+from aiohttp import web
 
 # --------------------------------------------------------------------------
 # SOZLAMALAR
@@ -47,32 +38,26 @@ import yt_dlp
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("dl-bot")
 
-# Tokenni HECH QACHON kodga yozmang — faqat environment variable orqali oling.
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise SystemExit(
         "BOT_TOKEN environment variable topilmadi.\n"
-        "Ishga tushirishdan oldin: export BOT_TOKEN=\"yangi_tokeningiz\""
+        "Render muhitiga BOT_TOKEN qo'shing."
     )
 
 DOWNLOAD_DIR = Path("downloads")
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
-MAX_FILE_SIZE = 49 * 1024 * 1024  # Telegram bot API limiti (~50MB)
-MAX_CONCURRENT_DOWNLOADS = 3       # bir vaqtda nechta yuklab olish tezlik/xavfsizlik uchun
+MAX_FILE_SIZE = 49 * 1024 * 1024  # 50MB limit
+MAX_CONCURRENT_DOWNLOADS = 3       
 
 URL_RE = re.compile(r"https?://\S+")
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# Har bir foydalanuvchi so'ragan linkni vaqtincha shu yerda saqlaymiz
-# (callback_data 64 baytdan oshmasligi kerak bo'lgani uchun URL'ni to'g'ridan-to'g'ri yubormaymiz)
 pending_urls: dict[str, str] = {}
-
-# Bir vaqtda ishlaydigan yuklab olishlar sonini cheklab, botni tez va barqaror ushlab turadi
 download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
-
 
 # --------------------------------------------------------------------------
 # YORDAMCHI FUNKSIYALAR
@@ -89,15 +74,15 @@ def is_supported(url: str) -> bool:
 
 
 def build_ydl_opts(mode: str, out_template: str) -> dict:
-    """mode: 'video' yoki 'audio'"""
     common = {
         "outtmpl": out_template,
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        "concurrent_fragment_downloads": 4,   # parallel fragment yuklash — tezlik uchun
+        "concurrent_fragment_downloads": 4,
         "retries": 3,
         "socket_timeout": 30,
+        "nocheckcertificate": True,
     }
     if mode == "audio":
         common.update({
@@ -109,17 +94,15 @@ def build_ydl_opts(mode: str, out_template: str) -> dict:
             }],
         })
     else:
-        # 50MB limitga sig'ishi uchun eng yaxshi sifatni, lekin haddan tashqari
-        # katta bo'lmagan formatni tanlaymiz
+        # Render qiynalib qolmasligi va tez ishlashi uchun tayyor format
         common.update({
-            "format": "bestvideo[filesize<48M]+bestaudio/best[filesize<48M]/best",
+            "format": "best",
             "merge_output_format": "mp4",
         })
     return common
 
 
 def run_download(url: str, mode: str) -> Path:
-    """Blocking funksiya — executor ichida chaqiriladi."""
     file_id = uuid.uuid4().hex
     out_template = str(DOWNLOAD_DIR / f"{file_id}.%(ext)s")
     opts = build_ydl_opts(mode, out_template)
@@ -127,8 +110,6 @@ def run_download(url: str, mode: str) -> Path:
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([url])
 
-    # Postprocessing tufayli kengaytma o'zgarishi mumkin (masalan mp3),
-    # shuning uchun shu file_id bilan boshlangan faylni qidiramiz
     matches = list(DOWNLOAD_DIR.glob(f"{file_id}.*"))
     if not matches:
         raise FileNotFoundError("Yuklab olingan fayl topilmadi")
@@ -162,8 +143,7 @@ async def cmd_start(message: Message):
 async def cmd_help(message: Message):
     await message.answer(
         "📌 Qo'llab-quvvatlanadigan manbalar: Instagram, YouTube.\n"
-        "Havolani yuboring, keyin video yoki audio formatini tanlang.\n"
-        f"⚠️ Telegram bot API cheklovi tufayli fayl hajmi {MAX_FILE_SIZE // (1024*1024)}MB dan oshmasligi kerak."
+        "Havolani yuboring, keyin video yoki audio formatini tanlang."
     )
 
 
@@ -211,10 +191,7 @@ async def handle_download_choice(callback: CallbackQuery):
 
         size = file_path.stat().st_size
         if size > MAX_FILE_SIZE:
-            await status_msg.edit_text(
-                "⚠️ Fayl hajmi juda katta (50MB limitidan oshib ketdi). "
-                "Boshqa (qisqaroq yoki quyi sifatli) manba bilan urinib ko'ring."
-            )
+            await status_msg.edit_text("⚠️ Fayl hajmi juda katta (50MB limitidan oshib ketdi).")
             return
 
         await status_msg.edit_text("📤 Yuborilmoqda...")
@@ -229,9 +206,7 @@ async def handle_download_choice(callback: CallbackQuery):
 
     except yt_dlp.utils.DownloadError as e:
         log.warning("Download error: %s", e)
-        await status_msg.edit_text(
-            "❌ Yuklab bo'lmadi. Havola noto'g'ri, video xususiy yoki o'chirilgan bo'lishi mumkin."
-        )
+        await status_msg.edit_text("❌ Yuklab bo'lmadi. Havola noto'g'ri yoki video yopiq bo'lishi mumkin.")
     except TelegramBadRequest as e:
         log.warning("Telegram send error: %s", e)
         await status_msg.edit_text("❌ Faylni yuborishda xatolik yuz berdi.")
@@ -247,11 +222,24 @@ async def handle_download_choice(callback: CallbackQuery):
 
 
 # --------------------------------------------------------------------------
-# ISHGA TUSHIRISH
+# RENDER SERVER VA ISHGA TUSHIRISH
 # --------------------------------------------------------------------------
 
+async def handle_web(request):
+    return web.Response(text="Bot is running!")
+
 async def main():
-    log.info("Bot ishga tushmoqda...")
+    # Render uchun HTTP serverni ishga tushiramiz (bot uxlab qolmasligi uchun)
+    app = web.Application()
+    app.router.add_get("/", handle_web)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    log.info(f"Web server {port}-portda ishga tushdi.")
+
+    log.info("Telegram bot polling boshlanmoqda...")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
