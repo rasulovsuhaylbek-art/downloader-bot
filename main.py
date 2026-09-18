@@ -16,8 +16,8 @@ def download_media(url: str, output_path: str) -> str:
     ydl_opts = {
         'format': 'best',
         'outtmpl': output_path,
-        'quiet': True,
-        'no_warnings': True,
+        'quiet': False,  # Xatoliklarni terminalda ko'rsatish uchun
+        'no_warnings': False,
         'nocheckcertificate': True,
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     }
@@ -47,7 +47,8 @@ async def media_handler(message: types.Message):
             await message.answer("❌ Videoni yuklab bo'lmadi.")
 
     except Exception as e:
-        await message.answer("❌ Videoni yuklashda xatolik yuz berdi. Havola to'g'riligini tekshiring.")
+        # Xatolikni to'g'ridan-to'g'ri bot orqali yozib yuborish uchun:
+        await message.answer(f"❌ Xatolik yuz berdi: {str(e)}")
         if os.path.exists(output_file):
             os.remove(output_file)
     finally:
