@@ -16,25 +16,21 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 def parse_media_url(url: str):
-    # Instagram havolasi
     ig_match = re.search(r'/(?:reel|p|reels)/([A-Za-z0-9_-]+)', url)
     if ig_match:
         code = ig_match.group(1)
         return "ig", code, f"https://www.instagram.com/reel/{code}/"
     
-    # YouTube Shorts havolasi
     yt_shorts = re.search(r'/shorts/([A-Za-z0-9_-]+)', url)
     if yt_shorts:
         code = yt_shorts.group(1)
         return "yt_shorts", code, f"https://www.youtube.com/shorts/{code}"
     
-    # YouTube youtu.be havolasi
     if "youtu.be/" in url:
         code = url.split("youtu.be/")[-1].split("?")[0].split("/")[0]
         if code:
             return "yt_watch", code, f"https://www.youtube.com/watch?v={code}"
             
-    # YouTube watch havolasi
     if "youtube.com" in url:
         parsed = urllib.parse.urlparse(url)
         query = urllib.parse.parse_qs(parsed.query)
@@ -52,6 +48,11 @@ def download_video(url: str, output_path: str):
         'no_warnings': True,
         'nocheckcertificate': True,
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'web']
+            }
+        },
         'postprocessors': [{
             'key': 'FFmpegVideoConvertor',
             'preferedformat': 'mp4',
@@ -80,6 +81,11 @@ def download_audio_file(url: str, output_path: str):
         'no_warnings': True,
         'nocheckcertificate': True,
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'web']
+            }
+        },
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
@@ -151,7 +157,6 @@ async def link_handler(message: types.Message):
 
             video = FSInputFile(output_file)
             
-            # Platforma va kodni tugma ichiga yozamiz
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🎵 Audiosini yuklab olish", callback_data=f"aud_{platform}_{code}")]
             ])
