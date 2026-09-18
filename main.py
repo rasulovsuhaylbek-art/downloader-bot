@@ -14,7 +14,6 @@ BOT_TOKEN = "8870665375:AAEtD8oMB-qEBQyMxPzn53pLwrJigWHk_rI"
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Havolalarni vaqtincha saqlash uchun lug'at
 url_cache = {}
 
 def download_video(url: str, output_path: str):
@@ -24,6 +23,7 @@ def download_video(url: str, output_path: str):
         'quiet': True,
         'no_warnings': True,
         'nocheckcertificate': True,
+        'playlist_end': 1,  # Audio sahifalar uchun birinchi videoni tanlaydi
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'postprocessors': [{
             'key': 'FFmpegVideoConvertor',
@@ -39,6 +39,9 @@ def download_video(url: str, output_path: str):
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
+            # Agar bu playlist (audio sahifa) bo'lsa, birinchi elementni olamiz
+            if info and 'entries' in info:
+                info = info['entries'][0]
             if info:
                 duration = int(info.get('duration', 0) or 0)
                 width = int(info.get('width', 0) or 0)
@@ -55,6 +58,7 @@ def download_audio_file(url: str, output_path: str):
         'quiet': True,
         'no_warnings': True,
         'nocheckcertificate': True,
+        'playlist_end': 1,  # Audio sahifalar uchun birinchi trekni tanlaydi
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
@@ -70,6 +74,8 @@ def download_audio_file(url: str, output_path: str):
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
+            if info and 'entries' in info:
+                info = info['entries'][0]
             if info:
                 title = info.get('title', 'Qo\'shiq')
                 duration = int(info.get('duration', 0) or 0)
@@ -95,7 +101,7 @@ def generate_thumbnail(video_path: str, thumb_path: str):
 
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
-    await message.answer("Salom! Menga Instagram, YouTube yoki boshqa tarmoq havolasini yuboring. Men uni video yoki qo'shiq (MP3) shaklida yuklab beraman.")
+    await message.answer("Salom! Menga istalgan Instagram Reels, video yoki audio sahifa havolasini yuboring. Uni video yoki MP3 shaklida yuklab beraman.")
 
 @dp.message(F.text.contains("http"))
 async def link_handler(message: types.Message):
