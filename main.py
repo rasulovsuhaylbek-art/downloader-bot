@@ -1,6 +1,7 @@
 import os
 import asyncio
 import logging
+import urllib.request
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
@@ -12,7 +13,7 @@ BOT_TOKEN = "8870665375:AAEtD8oMB-qEBQyMxPzn53pLwrJigWHk_rI"
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-def download_media(url: str, output_path: str):
+def download_media(url: str, output_path: str, thumb_path: str):
     ydl_opts = {
         'format': 'best',
         'outtmpl': output_path,
@@ -24,39 +25,52 @@ def download_media(url: str, output_path: str):
     duration = 0
     width = 0
     height = 0
+    thumb_file = None
+
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         if info:
             duration = int(info.get('duration', 0) or 0)
             width = int(info.get('width', 0) or 0)
             height = int(info.get('height', 0) or 0)
-    return output_path, duration, width, height
+            
+            # Videoning muqova rasmini (thumbnail) tortib olish
+            thumb_url = info.get('thumbnail')
+            if thumb_url:
+                try:
+                    urllib.request.urlretrieve(thumb_url, thumb_path)
+                    if os.path.exists(thumb_path):
+                        thumb_file = thumb_path
+                except Exception:
+                    pass
+
+    return output_path, duration, width, height, thumb_file
 
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
-    await message.answer("Salom! Menga Instagram yoki boshqa tarmoq havolasini yuboring, videoni chiroyli pleyerda yuklab beraman.")
+    await message.answer("Salom! Menga Instagram havolasini yuboring, videoni chiroyli muqova va pleyerda yuklab beraman.")
 
 @dp.message(F.text.contains("http"))
 async def media_handler(message: types.Message):
     url = message.text.strip()
     status_msg = await message.answer("⏳ Media yuklanmoqda, kuting...")
+    
     output_file = f"file_{message.from_user.id}.mp4"
+    thumb_file = f"thumb_{message.from_user.id}.jpg"
 
     try:
         loop = asyncio.get_event_loop()
-        output_file, duration, width, height = await loop.run_in_executor(
-            None, download_media, url, output_file
+        output_file, duration, width, height, thumb_path = await loop.run_in_executor(
+            None, download_media, url, output_file, thumb_file
         )
 
         if os.path.exists(output_file):
             video = FSInputFile(output_file)
             
-            # Botingizning to'g'ri havolasi va tugmasi
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🚀 @mix_videobot orqali yuklab olindi", url="https://t.me/mix_videobot")]
             ])
             
-            # Agar yt-dlp o'lchamni aniqlay olmasa, Reels uchun standart tikka o'lcham (1080x1920) beriladi
             final_width = width if width > 0 else 1080
             final_height = height if height > 0 else 1920
             
@@ -71,9 +85,17 @@ async def media_handler(message: types.Message):
             }
             if duration > 0:
                 kwargs["duration"] = duration
+            
+            # Agar muqova rasm muvaffaqiyatli yuklangan bo'lsa, unga qo'shamiz
+            if thumb_path and os.path.exists(thumb_path):
+                kwargs["thumbnail"] = FSInputFile(thumb_path)
 
             await message.answer_video(**kwargs)
+            
+            # Vaqtinchalik fayllarni tozalash
             os.remove(output_file)
+            if thumb_path and os.path.exists(thumb_path):
+                os.remove(thumb_path)
         else:
             await message.answer("❌ Videoni yuklab bo'lmadi.")
 
@@ -81,6 +103,8 @@ async def media_handler(message: types.Message):
         await message.answer("❌ Videoni yuklashda xatolik yuz berdi. Havola to'g'riligini tekshiring.")
         if os.path.exists(output_file):
             os.remove(output_file)
+        if os.path.exists(thumb_file):
+            os.remove(thumb_file)
     finally:
         await status_msg.delete()
 
