@@ -3,6 +3,7 @@ import asyncio
 import logging
 import subprocess
 import re
+import urllib.parse
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
@@ -14,11 +15,34 @@ BOT_TOKEN = "8870665375:AAEtD8oMB-qEBQyMxPzn53pLwrJigWHk_rI"
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-def extract_shortcode(url: str):
-    match = re.search(r'/(?:reel|p|reels)/([A-Za-z0-9_-]+)', url)
-    if match:
-        return match.group(1)
-    return None
+def parse_media_url(url: str):
+    # Instagram havolasi
+    ig_match = re.search(r'/(?:reel|p|reels)/([A-Za-z0-9_-]+)', url)
+    if ig_match:
+        code = ig_match.group(1)
+        return "ig", code, f"https://www.instagram.com/reel/{code}/"
+    
+    # YouTube Shorts havolasi
+    yt_shorts = re.search(r'/shorts/([A-Za-z0-9_-]+)', url)
+    if yt_shorts:
+        code = yt_shorts.group(1)
+        return "yt_shorts", code, f"https://www.youtube.com/shorts/{code}"
+    
+    # YouTube youtu.be havolasi
+    if "youtu.be/" in url:
+        code = url.split("youtu.be/")[-1].split("?")[0].split("/")[0]
+        if code:
+            return "yt_watch", code, f"https://www.youtube.com/watch?v={code}"
+            
+    # YouTube watch havolasi
+    if "youtube.com" in url:
+        parsed = urllib.parse.urlparse(url)
+        query = urllib.parse.parse_qs(parsed.query)
+        if 'v' in query:
+            code = query['v'][0]
+            return "yt_watch", code, f"https://www.youtube.com/watch?v={code}"
+            
+    return None, None, url
 
 def download_video(url: str, output_path: str):
     ydl_opts = {
@@ -92,19 +116,19 @@ def generate_thumbnail(video_path: str, thumb_path: str):
 
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
-    await message.answer("Salom! Menga Instagram havolasini yuboring. Men videoni darhol yuklab beraman.")
+    await message.answer("Salom! Menga Instagram yoki YouTube (video va Shorts) havolasini yuboring. Men uni darhol yuklab beraman.")
 
 @dp.message(F.text.contains("http"))
 async def link_handler(message: types.Message):
     url = message.text.strip()
     
     if "/reels/audio/" in url:
-        await message.answer("⚠️ Iltimos, audio sahifa havolasini emas, aniq bir video (Reel) havolasini yuboring.")
+        await message.answer("⚠️ Iltimos, audio sahifa havolasini emas, aniq bir video havolasini yuboring.")
         return
 
-    shortcode = extract_shortcode(url)
-    if not shortcode:
-        await message.answer("❌ Havoladan video kodini aniqlab bo'lmadi. Iltimos, to'g'ri Instagram havolasini yuboring.")
+    platform, code, clean_url = parse_media_url(url)
+    if not code:
+        await message.answer("❌ Havolani aniqlab bo'lmadi. Iltimos, to'g'ri Instagram yoki YouTube havolasini yuboring.")
         return
 
     status_msg = await message.answer("⏳ Video yuklanmoqda, kuting...")
@@ -116,7 +140,7 @@ async def link_handler(message: types.Message):
     try:
         loop = asyncio.get_event_loop()
         output_file, duration, width, height = await loop.run_in_executor(
-            None, download_video, url, output_file
+            None, download_video, clean_url, output_file
         )
 
         thumb_path = None
@@ -127,9 +151,9 @@ async def link_handler(message: types.Message):
 
             video = FSInputFile(output_file)
             
-            # Shortcode to'g'ridan-to'g'ri tugmaga yoziladi (xotira shart emas)
+            # Platforma va kodni tugma ichiga yozamiz
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🎵 Audiosini yuklab olish", callback_data=f"aud_{shortcode}")]
+                [InlineKeyboardButton(text="🎵 Audiosini yuklab olish", callback_data=f"aud_{platform}_{code}")]
             ])
             
             kwargs = {
@@ -164,8 +188,23 @@ async def link_handler(message: types.Message):
 
 @dp.callback_query(F.data.startswith("aud_"))
 async def callback_audio(callback: types.CallbackQuery):
-    shortcode = callback.data.split("_", 1)[1]
-    url = f"https://www.instagram.com/reel/{shortcode}/"
+    parts = callback.data.split("_", 2)
+    if len(parts) < 3:
+        await callback.answer("❌ Xatolik: Havola ma'lumotlari topilmadi.", show_alert=True)
+        return
+        
+    platform = parts[1]
+    code = parts[2]
+    
+    if platform == "ig":
+        url = f"https://www.instagram.com/reel/{code}/"
+    elif platform == "yt_shorts":
+        url = f"https://www.youtube.com/shorts/{code}"
+    elif platform == "yt_watch":
+        url = f"https://www.youtube.com/watch?v={code}"
+    else:
+        await callback.answer("❌ Noma'lum platforma.", show_alert=True)
+        return
     
     await callback.answer("⏳ Qo'shiq yuklanmoqda...")
     user_id = callback.from_user.id
