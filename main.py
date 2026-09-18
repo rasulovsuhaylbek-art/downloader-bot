@@ -34,7 +34,7 @@ def download_media(url: str, output_path: str):
 
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
-    await message.answer("Salom! Menga Instagram havolasini yuboring, chiroyli video qilib yuklab beraman.")
+    await message.answer("Salom! Menga Instagram yoki boshqa tarmoq havolasini yuboring, videoni chiroyli pleyerda yuklab beraman.")
 
 @dp.message(F.text.contains("http"))
 async def media_handler(message: types.Message):
@@ -51,24 +51,26 @@ async def media_handler(message: types.Message):
         if os.path.exists(output_file):
             video = FSInputFile(output_file)
             
+            # Botingizning to'g'ri havolasi va tugmasi
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🚀 Botimizdan foydalanish", url="https://t.me/UniversalDownloaderBot")]
+                [InlineKeyboardButton(text="🚀 @mix_videobot orqali yuklab olindi", url="https://t.me/mix_videobot")]
             ])
             
-            # supports_streaming=True parametri videoni faylga aylantirib yubormasdan, to'g'ridan-to'g'ri pleyer qiladi
+            # Agar yt-dlp o'lchamni aniqlay olmasa, Reels uchun standart tikka o'lcham (1080x1920) beriladi
+            final_width = width if width > 0 else 1080
+            final_height = height if height > 0 else 1920
+            
             kwargs = {
                 "video": video,
                 "caption": "✅ **Muvaffaqiyatli yuklab olindi!**",
                 "parse_mode": "Markdown",
                 "supports_streaming": True,
+                "width": final_width,
+                "height": final_height,
                 "reply_markup": keyboard
             }
             if duration > 0:
                 kwargs["duration"] = duration
-            if width > 0:
-                kwargs["width"] = width
-            if height > 0:
-                kwargs["height"] = height
 
             await message.answer_video(**kwargs)
             os.remove(output_file)
