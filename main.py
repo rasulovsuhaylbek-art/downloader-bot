@@ -34,7 +34,7 @@ def download_media(url: str, output_path: str):
 
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
-    await message.answer("Salom! Menga Instagram yoki boshqa tarmoq havolasini yuboring, chiroyli qilib yuklab beraman.")
+    await message.answer("Salom! Menga Instagram havolasini yuboring, chiroyli video qilib yuklab beraman.")
 
 @dp.message(F.text.contains("http"))
 async def media_handler(message: types.Message):
@@ -51,16 +51,16 @@ async def media_handler(message: types.Message):
         if os.path.exists(output_file):
             video = FSInputFile(output_file)
             
-            # Professional botlardek ostiga tugma qo'shamiz
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🚀 Botimizdan foydalanish", url="https://t.me/UniversalDownloaderBot")]
             ])
             
-            # Videoni katta va sifatli qilib yuborish parametrlari
+            # supports_streaming=True parametri videoni faylga aylantirib yubormasdan, to'g'ridan-to'g'ri pleyer qiladi
             kwargs = {
                 "video": video,
                 "caption": "✅ **Muvaffaqiyatli yuklab olindi!**",
                 "parse_mode": "Markdown",
+                "supports_streaming": True,
                 "reply_markup": keyboard
             }
             if duration > 0:
