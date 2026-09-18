@@ -14,7 +14,6 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 def download_media(url: str, output_path: str):
-    # faststart yordamida videoning metama'lumotlarini boshiga o'tkizamiz (0:00 xatoligini yo'qotadi)
     ydl_opts = {
         'format': 'best',
         'outtmpl': output_path,
@@ -46,7 +45,6 @@ def download_media(url: str, output_path: str):
 
 def generate_thumbnail(video_path: str, thumb_path: str):
     try:
-        # ffmpeg orqali videoning boshidan chiroyli kadrni rasm qilib kesib olamiz
         cmd = [
             'ffmpeg', '-y', '-i', video_path,
             '-ss', '00:00:01', '-vframes', '1',
@@ -61,7 +59,7 @@ def generate_thumbnail(video_path: str, thumb_path: str):
 
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
-    await message.answer("Salom! Menga Instagram havolasini yuboring, videoni to'g'ri pleyer va muqova bilan yuklab beraman.")
+    await message.answer("Salom! Menga Instagram havolasini yuboring, videoni chiroyli muqova va pleyerda yuklab beraman.")
 
 @dp.message(F.text.contains("http"))
 async def media_handler(message: types.Message):
@@ -79,23 +77,24 @@ async def media_handler(message: types.Message):
 
         thumb_path = None
         if os.path.exists(output_file):
-            # Videodan muqova yasaymiz
             thumb_path = await loop.run_in_executor(
                 None, generate_thumbnail, output_file, thumb_file
             )
 
             video = FSInputFile(output_file)
             
+            # Tugma yozuvi o'zgartirildi
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🚀 @mix_videobot orqali yuklab olindi", url="https://t.me/mix_videobot")]
+                [InlineKeyboardButton(text="🚀 Botdan foydalanish", url="https://t.me/mix_videobot")]
             ])
             
             final_width = width if width > 0 else 1080
             final_height = height if height > 0 else 1920
             
+            # Video ostidagi yozuv o'zgartirildi
             kwargs = {
                 "video": video,
-                "caption": "✅ **Muvaffaqiyatli yuklab olindi!**",
+                "caption": "✅ **@mix_videobot orqali yuklab olindi**",
                 "parse_mode": "Markdown",
                 "supports_streaming": True,
                 "width": final_width,
