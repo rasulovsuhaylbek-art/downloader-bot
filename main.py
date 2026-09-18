@@ -16,8 +16,8 @@ def download_media(url: str, output_path: str) -> str:
     ydl_opts = {
         'format': 'best',
         'outtmpl': output_path,
-        'quiet': False,  # Xatoliklarni terminalda ko'rsatish uchun
-        'no_warnings': False,
+        'quiet': True,
+        'no_warnings': True,
         'nocheckcertificate': True,
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     }
@@ -27,7 +27,7 @@ def download_media(url: str, output_path: str) -> str:
 
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
-    await message.answer("Salom! Menga video havolasini yuboring, yuklab beraman.")
+    await message.answer("Salom! Menga Instagram yoki boshqa tarmoq havolasini yuboring, yuklab beraman.")
 
 @dp.message(F.text.contains("http"))
 async def media_handler(message: types.Message):
@@ -41,14 +41,14 @@ async def media_handler(message: types.Message):
 
         if os.path.exists(output_file):
             video = FSInputFile(output_file)
-            await message.answer_video(video=video, caption="✅ Muvaffaqiyatli yuklandi!")
+            # Videoni hujjat shaklida yuborish (shakli buzilmaydi va sifatini yo'qotmaydi)
+            await message.answer_document(document=video, caption="✅ Muvaffaqiyatli yuklandi!")
             os.remove(output_file)
         else:
             await message.answer("❌ Videoni yuklab bo'lmadi.")
 
     except Exception as e:
-        # Xatolikni to'g'ridan-to'g'ri bot orqali yozib yuborish uchun:
-        await message.answer(f"❌ Xatolik yuz berdi: {str(e)}")
+        await message.answer("❌ Videoni yuklashda xatolik yuz berdi. Havola to'g'riligini tekshiring.")
         if os.path.exists(output_file):
             os.remove(output_file)
     finally:
