@@ -1,10 +1,11 @@
 """
 Instagram/YouTube Video & Audio Downloader — Telegram bot
-Kutubxonalar: aiogram 3.x, yt-dlp, aiohttp
+Kutubxonalar: aiogram 3.x, yt-dlp, aiohttp, python-dotenv
 """
 
 import os
 import re
+import sys
 import uuid
 import asyncio
 import logging
@@ -27,7 +28,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramUnauthorizedError
 import yt_dlp
 from aiohttp import web
 
@@ -35,21 +36,23 @@ from aiohttp import web
 # SOZLAMALAR
 # --------------------------------------------------------------------------
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    stream=sys.stdout,  # Render loglarida ko'rinishi uchun stdout'ga majburlash
+)
 log = logging.getLogger("dl-bot")
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise SystemExit(
-        "BOT_TOKEN environment variable topilmadi.\n"
-        "Render muhitiga BOT_TOKEN qo'shing."
-    )
+    log.critical("BOT_TOKEN environment variable topilmadi! Render > Environment bo'limini tekshiring.")
+    raise SystemExit(1)
 
 DOWNLOAD_DIR = Path("downloads")
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
-MAX_FILE_SIZE = 49 * 1024 * 1024  # 50MB limit
-MAX_CONCURRENT_DOWNLOADS = 3       
+MAX_FILE_SIZE = 49 * 1024 * 1024
+MAX_CONCURRENT_DOWNLOADS = 3
 
 URL_RE = re.compile(r"https?://\S+")
 
@@ -58,6 +61,7 @@ dp = Dispatcher()
 
 pending_urls: dict[str, str] = {}
 download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
+
 
 # --------------------------------------------------------------------------
 # YORDAMCHI FUNKSIYALAR
@@ -94,9 +98,8 @@ def build_ydl_opts(mode: str, out_template: str) -> dict:
             }],
         })
     else:
-        # Render qiynalib qolmasligi va tez ishlashi uchun tayyor format
         common.update({
-            "format": "best",
+            "format": "best[filesize<48M]/best",
             "merge_output_format": "mp4",
         })
     return common
@@ -131,6 +134,7 @@ def format_choice_keyboard(token: str) -> InlineKeyboardMarkup:
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
+    log.info("/start qabul qilindi: user_id=%s", message.from_user.id)
     await message.answer(
         "👋 Salom!\n\n"
         "Menga <b>Instagram</b> yoki <b>YouTube</b> havolasini yuboring — "
@@ -210,7 +214,7 @@ async def handle_download_choice(callback: CallbackQuery):
     except TelegramBadRequest as e:
         log.warning("Telegram send error: %s", e)
         await status_msg.edit_text("❌ Faylni yuborishda xatolik yuz berdi.")
-    except Exception as e:
+    except Exception:
         log.exception("Unexpected error")
         await status_msg.edit_text("❌ Kutilmagan xatolik yuz berdi. Qayta urinib ko'ring.")
     finally:
@@ -228,8 +232,9 @@ async def handle_download_choice(callback: CallbackQuery):
 async def handle_web(request):
     return web.Response(text="Bot is running!")
 
+
 async def main():
-    # Render uchun HTTP serverni ishga tushiramiz (bot uxlab qolmasligi uchun)
+    # 1) Render "Web Service" portni talab qiladi — health-check server
     app = web.Application()
     app.router.add_get("/", handle_web)
     runner = web.AppRunner(app)
@@ -237,11 +242,33 @@ async def main():
     port = int(os.environ.get("PORT", 8080))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    log.info(f"Web server {port}-portda ishga tushdi.")
+    log.info("Web server %s-portda ishga tushdi.", port)
 
-    log.info("Telegram bot polling boshlanmoqda...")
+    # 2) Tokenni tekshirish — noto'g'ri token bo'lsa DARHOL aniq xato beradi
+    try:
+        me = await bot.get_me()
+        log.info("Bot muvaffaqiyatli ulandi: @%s (id=%s)", me.username, me.id)
+    except TelegramUnauthorizedError:
+        log.critical(
+            "TOKEN NOTO'G'RI yoki BEKOR QILINGAN (401 Unauthorized). "
+            "Render > Environment > BOT_TOKEN qiymatini yangilang va Manual Deploy qiling."
+        )
+        return
+    except Exception:
+        log.exception("Botga ulanishda kutilmagan xato.")
+        return
+
+    # 3) Eski webhook/pollingni tozalab, yagona polling boshlanadi
     await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+    log.info("Polling boshlanmoqda...")
+    try:
+        await dp.start_polling(bot)
+    except Exception:
+        log.exception(
+            "Polling to'xtadi. Agar 'TerminatedByOtherGetUpdates' xatosi bo'lsa — "
+            "shu tokenda BOSHQA joyda (masalan kompyuteringizda) bot ishlab turgani uchun shunday bo'ladi. "
+            "Faqat bitta joyda ishga tushiring."
+        )
 
 
 if __name__ == "__main__":
