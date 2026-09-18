@@ -1,350 +1,261 @@
+"""
+Instagram/YouTube Video & Audio Downloader — Telegram bot
+Kutubxonalar: aiogram 3.x, yt-dlp
+
+O'rnatish:
+    pip install aiogram yt-dlp --break-system-packages
+    (yt-dlp doim eng yangi versiyada bo'lishi kerak: pip install -U yt-dlp --break-system-packages)
+
+Ishga tushirish:
+    export BOT_TOKEN="sizning_yangi_tokeningiz"
+    python3 bot.py
+"""
+
 import os
+import re
 import uuid
-import glob
-import html
+import shutil
 import asyncio
 import logging
-import subprocess
-import re
-import urllib.parse
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import CommandStart
-from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
+from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()  # loyiha papkasidagi .env faylni avtomatik o'qiydi
+except ImportError:
+    pass  # python-dotenv o'rnatilmagan bo'lsa, oddiy environment variable ishlatiladi
+
+from aiogram import Bot, Dispatcher, F
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.filters import CommandStart, Command
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    FSInputFile,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
+from aiogram.exceptions import TelegramBadRequest
+
 import yt_dlp
-from aiohttp import web
 
-# TODO: xavfsizlik uchun tokenni keyinroq environment variable orqali oling:
-# BOT_TOKEN = os.environ["BOT_TOKEN"]
-BOT_TOKEN = "8870665375:AAEtD8oMB-qEBQyMxPzn53pLwrJigWHk_rI"
+# --------------------------------------------------------------------------
+# SOZLAMALAR
+# --------------------------------------------------------------------------
 
-bot = Bot(token=BOT_TOKEN)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("dl-bot")
+
+# Tokenni HECH QACHON kodga yozmang — faqat environment variable orqali oling.
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise SystemExit(
+        "BOT_TOKEN environment variable topilmadi.\n"
+        "Ishga tushirishdan oldin: export BOT_TOKEN=\"yangi_tokeningiz\""
+    )
+
+DOWNLOAD_DIR = Path("downloads")
+DOWNLOAD_DIR.mkdir(exist_ok=True)
+
+MAX_FILE_SIZE = 49 * 1024 * 1024  # Telegram bot API limiti (~50MB)
+MAX_CONCURRENT_DOWNLOADS = 3       # bir vaqtda nechta yuklab olish tezlik/xavfsizlik uchun
+
+URL_RE = re.compile(r"https?://\S+")
+
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-MAX_FILE_SIZE = 49 * 1024 * 1024  # Telegram bot API ~50MB limiti
+# Har bir foydalanuvchi so'ragan linkni vaqtincha shu yerda saqlaymiz
+# (callback_data 64 baytdan oshmasligi kerak bo'lgani uchun URL'ni to'g'ridan-to'g'ri yubormaymiz)
+pending_urls: dict[str, str] = {}
+
+# Bir vaqtda ishlaydigan yuklab olishlar sonini cheklab, botni tez va barqaror ushlab turadi
+download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 
 
-# ---------- URL aniqlash ----------
+# --------------------------------------------------------------------------
+# YORDAMCHI FUNKSIYALAR
+# --------------------------------------------------------------------------
 
-def parse_media_url(url: str):
-    ig_match = re.search(r'/(?:reel|p|reels)/([A-Za-z0-9_-]+)', url)
-    if ig_match:
-        code = ig_match.group(1)
-        return "ig", code, f"https://www.instagram.com/reel/{code}/"
-
-    yt_shorts = re.search(r'/shorts/([A-Za-z0-9_-]+)', url)
-    if yt_shorts:
-        code = yt_shorts.group(1)
-        return "yts", code, f"https://www.youtube.com/shorts/{code}"
-
-    if "youtu.be/" in url:
-        code = url.split("youtu.be/")[-1].split("?")[0].split("/")[0]
-        if code:
-            return "ytw", code, f"https://www.youtube.com/watch?v={code}"
-
-    if "youtube.com" in url:
-        parsed = urllib.parse.urlparse(url)
-        query = urllib.parse.parse_qs(parsed.query)
-        if 'v' in query:
-            code = query['v'][0]
-            return "ytw", code, f"https://www.youtube.com/watch?v={code}"
-
-    return None, None, url
+def extract_url(text: str) -> str | None:
+    match = URL_RE.search(text or "")
+    return match.group(0) if match else None
 
 
-def build_url(platform: str, code: str) -> str:
-    if platform == "ig":
-        return f"https://www.instagram.com/reel/{code}/"
-    if platform == "yts":
-        return f"https://www.youtube.com/shorts/{code}"
-    if platform == "ytw":
-        return f"https://www.youtube.com/watch?v={code}"
-    return ""
+def is_supported(url: str) -> bool:
+    url = url.lower()
+    return any(d in url for d in ("instagram.com", "youtube.com", "youtu.be"))
 
 
-def cleanup(base_path: str):
-    """base_path bilan boshlanadigan barcha vaqtinchalik fayllarni o'chiradi."""
-    for f in glob.glob(base_path + "*"):
-        try:
-            os.remove(f)
-        except OSError:
-            pass
-
-
-# ---------- Yuklab olish funksiyalari ----------
-
-def download_video(url: str, output_path: str):
-    ydl_opts = {
-        'format': 'best',
-        'outtmpl': output_path,
-        'quiet': True,
-        'no_warnings': True,
-        'nocheckcertificate': True,
-        'user_agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['ios', 'mweb']
-            }
-        },
-        'postprocessors': [{
-            'key': 'FFmpegVideoConvertor',
-            'preferedformat': 'mp4',
-        }],
-        'postprocessor_args': {
-            'ffmpeg': ['-movflags', '+faststart']
-        }
+def build_ydl_opts(mode: str, out_template: str) -> dict:
+    """mode: 'video' yoki 'audio'"""
+    common = {
+        "outtmpl": out_template,
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "concurrent_fragment_downloads": 4,   # parallel fragment yuklash — tezlik uchun
+        "retries": 3,
+        "socket_timeout": 30,
     }
-    duration = 0
-    width = 0
-    height = 0
-    title = "Video"
-    uploader = "Noma'lum"
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        if info:
-            duration = int(info.get('duration', 0) or 0)
-            width = int(info.get('width', 0) or 0)
-            height = int(info.get('height', 0) or 0)
-            title = info.get('title') or "Video"
-            uploader = info.get('uploader') or info.get('channel') or "Noma'lum"
-    return output_path, duration, width, height, title, uploader
+    if mode == "audio":
+        common.update({
+            "format": "bestaudio/best",
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }],
+        })
+    else:
+        # 50MB limitga sig'ishi uchun eng yaxshi sifatni, lekin haddan tashqari
+        # katta bo'lmagan formatni tanlaymiz
+        common.update({
+            "format": "bestvideo[filesize<48M]+bestaudio/best[filesize<48M]/best",
+            "merge_output_format": "mp4",
+        })
+    return common
 
 
-def download_audio_file(url: str, output_path: str):
-    base_path = output_path.replace('.mp4', '')
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'outtmpl': base_path + '.%(ext)s',
-        'quiet': True,
-        'no_warnings': True,
-        'nocheckcertificate': True,
-        'user_agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['ios', 'mweb']
-            }
-        },
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }],
-    }
-    title = "Qo'shiq"
-    duration = 0
-    performer = "Mix Video Bot"
-    mp3_path = base_path + '.mp3'
+def run_download(url: str, mode: str) -> Path:
+    """Blocking funksiya — executor ichida chaqiriladi."""
+    file_id = uuid.uuid4().hex
+    out_template = str(DOWNLOAD_DIR / f"{file_id}.%(ext)s")
+    opts = build_ydl_opts(mode, out_template)
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        if info:
-            title = info.get('title') or "Qo'shiq"
-            duration = int(info.get('duration', 0) or 0)
-            performer = info.get('uploader') or info.get('artist') or info.get('channel') or "Mix Video Bot"
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        ydl.download([url])
 
-    return mp3_path, title, duration, performer
+    # Postprocessing tufayli kengaytma o'zgarishi mumkin (masalan mp3),
+    # shuning uchun shu file_id bilan boshlangan faylni qidiramiz
+    matches = list(DOWNLOAD_DIR.glob(f"{file_id}.*"))
+    if not matches:
+        raise FileNotFoundError("Yuklab olingan fayl topilmadi")
+    return matches[0]
 
 
-def generate_thumbnail(video_path: str, thumb_path: str):
-    try:
-        cmd = [
-            'ffmpeg', '-y', '-i', video_path,
-            '-ss', '00:00:01', '-vframes', '1',
-            '-vf', 'scale=320:-1', thumb_path
+def format_choice_keyboard(token: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🎬 Video", callback_data=f"dl:video:{token}"),
+            InlineKeyboardButton(text="🎵 Audio (mp3)", callback_data=f"dl:audio:{token}"),
         ]
-        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
-        if os.path.exists(thumb_path):
-            return thumb_path
-    except Exception:
-        pass
-    return None
+    ])
 
 
-# ---------- Chiroyli caption'lar ----------
-
-def video_caption(title: str, uploader: str) -> str:
-    safe_title = html.escape(title.strip())[:150]
-    safe_uploader = html.escape(uploader.strip())[:80]
-    return (
-        f"🎬 <b>{safe_title}</b>\n"
-        f"👤 {safe_uploader}\n\n"
-        f"✅ @mix_videobot orqali yuklab olindi"
-    )
-
-
-def audio_caption(title: str, performer: str) -> str:
-    safe_title = html.escape(title.strip())[:150]
-    safe_performer = html.escape(performer.strip())[:80]
-    return (
-        f"🎧 <b>{safe_title}</b>\n"
-        f"🎤 {safe_performer}\n\n"
-        f"✅ @mix_videobot orqali yuklab olindi"
-    )
-
-
-# ---------- Handlerlar ----------
+# --------------------------------------------------------------------------
+# HANDLERLAR
+# --------------------------------------------------------------------------
 
 @dp.message(CommandStart())
-async def start_handler(message: types.Message):
+async def cmd_start(message: Message):
     await message.answer(
-        "👋 <b>Salom!</b>\n\n"
-        "Menga quyidagilardan birini yuboring:\n"
-        "📸 Instagram (Reels) havolasi\n"
-        "▶️ YouTube video yoki Shorts havolasi\n\n"
-        "Video darhol yuklab beriladi, xohlasangiz o'sha videoning "
-        "audiosini ham alohida ajratib beraman 🎧",
-        parse_mode="HTML"
+        "👋 Salom!\n\n"
+        "Menga <b>Instagram</b> yoki <b>YouTube</b> havolasini yuboring — "
+        "video yoki faqat audio (mp3) shaklida yuklab beraman.\n\n"
+        "Shunchaki linkni tashlang 🙂"
     )
 
 
-@dp.message(F.text.contains("http"))
-async def link_handler(message: types.Message):
-    url = message.text.strip()
+@dp.message(Command("help"))
+async def cmd_help(message: Message):
+    await message.answer(
+        "📌 Qo'llab-quvvatlanadigan manbalar: Instagram, YouTube.\n"
+        "Havolani yuboring, keyin video yoki audio formatini tanlang.\n"
+        f"⚠️ Telegram bot API cheklovi tufayli fayl hajmi {MAX_FILE_SIZE // (1024*1024)}MB dan oshmasligi kerak."
+    )
 
-    if "/reels/audio/" in url:
-        await message.answer("⚠️ Iltimos, audio sahifa havolasini emas, aniq bir video havolasini yuboring.")
+
+@dp.message(F.text)
+async def handle_link(message: Message):
+    url = extract_url(message.text)
+    if not url:
+        await message.answer("Iltimos, to'g'ri havola (link) yuboring.")
         return
 
-    platform, code, clean_url = parse_media_url(url)
-    if not code:
-        await message.answer("❌ Havolani aniqlab bo'lmadi. Iltimos, to'g'ri Instagram yoki YouTube havolasini yuboring.")
+    if not is_supported(url):
+        await message.answer("Faqat Instagram va YouTube havolalarini qo'llab-quvvatlayman.")
         return
 
-    status_msg = await message.answer("⏳ Video yuklanmoqda, kuting...")
-    user_id = message.from_user.id
-    req_id = uuid.uuid4().hex[:8]
+    token = uuid.uuid4().hex[:12]
+    pending_urls[token] = url
 
-    base_name = f"file_{user_id}_{req_id}"
-    thumb_base = f"thumb_{user_id}_{req_id}"
-    output_file = f"{base_name}.mp4"
-    thumb_file = f"{thumb_base}.jpg"
+    await message.answer(
+        "Qanday formatda yuklab olay?",
+        reply_markup=format_choice_keyboard(token),
+    )
 
+
+@dp.callback_query(F.data.startswith("dl:"))
+async def handle_download_choice(callback: CallbackQuery):
     try:
-        await bot.send_chat_action(chat_id=message.chat.id, action="typing")
-        loop = asyncio.get_event_loop()
-        output_file, duration, width, height, title, uploader = await loop.run_in_executor(
-            None, download_video, clean_url, output_file
-        )
+        _, mode, token = callback.data.split(":", 2)
+    except ValueError:
+        await callback.answer("Xato so'rov.", show_alert=True)
+        return
 
-        if not os.path.exists(output_file):
-            await message.answer("❌ Videoni yuklab bo'lmadi.")
+    url = pending_urls.pop(token, None)
+    if not url:
+        await callback.answer("Havola muddati tugagan, iltimos qayta yuboring.", show_alert=True)
+        return
+
+    await callback.answer()
+    status_msg = await callback.message.edit_text("⏳ Yuklab olinmoqda, biroz kuting...")
+
+    file_path: Path | None = None
+    try:
+        async with download_semaphore:
+            loop = asyncio.get_running_loop()
+            file_path = await loop.run_in_executor(None, run_download, url, mode)
+
+        size = file_path.stat().st_size
+        if size > MAX_FILE_SIZE:
+            await status_msg.edit_text(
+                "⚠️ Fayl hajmi juda katta (50MB limitidan oshib ketdi). "
+                "Boshqa (qisqaroq yoki quyi sifatli) manba bilan urinib ko'ring."
+            )
             return
 
-        if os.path.getsize(output_file) > MAX_FILE_SIZE:
-            await message.answer("⚠️ Video hajmi juda katta (50MB dan oshadi), Telegram bot orqali yuborib bo'lmaydi.")
-            return
+        await status_msg.edit_text("📤 Yuborilmoqda...")
+        input_file = FSInputFile(file_path)
 
-        thumb_path = await loop.run_in_executor(
-            None, generate_thumbnail, output_file, thumb_file
-        )
+        if mode == "audio":
+            await callback.message.answer_audio(input_file)
+        else:
+            await callback.message.answer_video(input_file)
 
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🎵 Audiosini yuklab olish", callback_data=f"aud|{platform}|{code}")]
-        ])
-
-        await bot.send_chat_action(chat_id=message.chat.id, action="upload_video")
-
-        kwargs = {
-            "video": FSInputFile(output_file),
-            "caption": video_caption(title, uploader),
-            "parse_mode": "HTML",
-            "supports_streaming": True,
-            "reply_markup": keyboard
-        }
-        if duration > 0:
-            kwargs["duration"] = duration
-        if width > 0 and height > 0:
-            kwargs["width"] = width
-            kwargs["height"] = height
-        if thumb_path and os.path.exists(thumb_path):
-            kwargs["thumbnail"] = FSInputFile(thumb_path)
-
-        await message.answer_video(**kwargs)
-
-    except Exception as e:
-        logging.exception("Video yuklashda xatolik")
-        await message.answer(f"❌ Xatolik yuz berdi: {e}")
-    finally:
-        cleanup(base_name)
-        cleanup(thumb_base)
         await status_msg.delete()
 
-
-@dp.callback_query(F.data.startswith("aud|"))
-async def callback_audio(callback: types.CallbackQuery):
-    parts = callback.data.split("|")
-    if len(parts) != 3:
-        await callback.answer("❌ Xatolik: Havola ma'lumotlari topilmadi.", show_alert=True)
-        return
-
-    _, platform, code = parts
-    url = build_url(platform, code)
-    if not url:
-        await callback.answer("❌ Noma'lum platforma.", show_alert=True)
-        return
-
-    await callback.answer("⏳ Qo'shiq yuklanmoqda...")
-    user_id = callback.from_user.id
-    req_id = uuid.uuid4().hex[:8]
-    base_name = f"file_aud_{user_id}_{req_id}"
-    output_file = f"{base_name}.mp4"
-
-    try:
-        await bot.send_chat_action(chat_id=callback.message.chat.id, action="typing")
-        loop = asyncio.get_event_loop()
-        mp3_path, title, duration, performer = await loop.run_in_executor(
-            None, download_audio_file, url, output_file
+    except yt_dlp.utils.DownloadError as e:
+        log.warning("Download error: %s", e)
+        await status_msg.edit_text(
+            "❌ Yuklab bo'lmadi. Havola noto'g'ri, video xususiy yoki o'chirilgan bo'lishi mumkin."
         )
-
-        if not os.path.exists(mp3_path):
-            await callback.message.answer("❌ Qo'shiqni yuklab bo'lmadi.")
-            return
-
-        if os.path.getsize(mp3_path) > MAX_FILE_SIZE:
-            await callback.message.answer("⚠️ Audio hajmi juda katta, Telegram bot orqali yuborib bo'lmaydi.")
-            return
-
-        await bot.send_chat_action(chat_id=callback.message.chat.id, action="upload_voice")
-
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🚀 @mix_videobot", url="https://t.me/mix_videobot")]
-        ])
-
-        await callback.message.answer_audio(
-            audio=FSInputFile(mp3_path),
-            title=title[:60],
-            performer=performer[:60],
-            duration=duration,
-            caption=audio_caption(title, performer),
-            parse_mode="HTML",
-            reply_markup=keyboard
-        )
-
+    except TelegramBadRequest as e:
+        log.warning("Telegram send error: %s", e)
+        await status_msg.edit_text("❌ Faylni yuborishda xatolik yuz berdi.")
     except Exception as e:
-        logging.exception("Audio yuklashda xatolik")
-        await callback.message.answer(f"❌ Xatolik yuz berdi: {e}")
+        log.exception("Unexpected error")
+        await status_msg.edit_text("❌ Kutilmagan xatolik yuz berdi. Qayta urinib ko'ring.")
     finally:
-        cleanup(base_name)
+        if file_path and file_path.exists():
+            try:
+                file_path.unlink()
+            except OSError:
+                pass
 
 
-# ---------- Web server (deploy uchun health-check) ----------
-
-async def handle(request):
-    return web.Response(text="Bot is running!")
-
+# --------------------------------------------------------------------------
+# ISHGA TUSHIRISH
+# --------------------------------------------------------------------------
 
 async def main():
-    app = web.Application()
-    app.router.add_get("/", handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.environ.get("PORT", 8080))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-
+    log.info("Bot ishga tushmoqda...")
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
     asyncio.run(main())
     
