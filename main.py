@@ -90,10 +90,11 @@ async def media_handler(message: types.Message):
             final_width = width if width > 0 else 1080
             final_height = height if height > 0 else 1920
             
-            # Markdown parse_mode olib tashlandi, shunda maxsus belgilar xato bermaydi
+            # parse_mode=None orqali har qanday formatlashni butunlay o'chiramiz
             kwargs = {
                 "video": video,
                 "caption": "✅ @mix_videobot orqali yuklab olindi",
+                "parse_mode": None,
                 "supports_streaming": True,
                 "width": final_width,
                 "height": final_height,
